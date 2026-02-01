@@ -8,24 +8,29 @@ export default {
     }
 
     // Upcoming MMA events
-    if (url.pathname === "/events") {
-      const apiUrl =
-        "https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/events";
+if (url.pathname === "/events") {
+  const key = env.ODDS_API_KEY;
 
-      const res = await fetch(apiUrl, {
-        headers: {
-          "X-Api-Key": env.ODDS_API_KEY
-        }
-      });
+  if (!key) {
+    return new Response(
+      JSON.stringify({ error: "ODDS_API_KEY secret not set in Worker runtime" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
 
-      return new Response(await res.text(), {
-        status: res.status,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
-    }
+  const apiUrl =
+    "https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/events" +
+    `?apiKey=${encodeURIComponent(key)}`;
+
+  const res = await fetch(apiUrl);
+
+  return new Response(await res.text(), {
+  status: res.status,
+  headers: {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+  },
+});
 
     // Odds for a specific event
     if (url.pathname === "/odds") {
