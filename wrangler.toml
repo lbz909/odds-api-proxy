@@ -1,6 +1,4 @@
+
 name = "odds-api-proxy"
 main = "src/index.js"
-compatibility_date = "2026-02-01"
-
-[vars]
-# leave blank here; we'll use a Secret in Cloudflare instead
+compatibility_date = "2026-02-02"
