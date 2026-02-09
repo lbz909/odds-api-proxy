@@ -5,13 +5,11 @@ export default {
 
     // CORS preflight
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: corsHeaders(),
-      });
+      return new Response(null, { headers: corsHeaders() });
     }
 
     try {
-      if (path === "/sports") return await handleSports(env);
+      if (path === "/sports") return await handleSports(url, env);
       if (path === "/events") return await handleEvents(url, env);
       if (path === "/snapshot") return await handleSnapshot(url, env);
 
@@ -43,12 +41,9 @@ async function oddsFetch(env, endpoint, params = {}) {
   const base = "https://api.the-odds-api.com/v4";
   const u = new URL(base + endpoint);
 
-  // attach params
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, String(v));
   }
-
-  // attach apiKey (required)
   u.searchParams.set("apiKey", env.ODDS_API_KEY);
 
   const res = await fetch(u.toString());
@@ -57,7 +52,6 @@ async function oddsFetch(env, endpoint, params = {}) {
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
-  // Helpful metadata: remaining requests etc if provided
   const meta = {
     status: res.status,
     remaining: res.headers.get("x-requests-remaining"),
@@ -68,17 +62,45 @@ async function oddsFetch(env, endpoint, params = {}) {
   return { error: false, meta, data };
 }
 
-async function handleSports(env) {
-  // MMA key commonly: mma_mixed_martial_arts
+const DEFAULT_SPORT = "mma_mixed_martial_arts";
+
+/**
+ * GET /sports
+ * Returns the real list of sports from The Odds API.
+ * Optional: ?only=mma,nfl,nba,mlb  (filters the returned list)
+ */
+async function handleSports(url, env) {
+  const only = (url.searchParams.get("only") || "").split(",").map(s => s.trim()).filter(Boolean);
+
+  const r = await oddsFetch(env, `/sports`, {});
+  if (r.error) return json(r, 502);
+
+  // Normalize to the keys/titles your GPT actually needs
+  let sports = Array.isArray(r.data)
+    ? r.data.map(s => ({
+        key: s.key,
+        title: s.title,
+        group: s.group,
+        active: s.active,
+      }))
+    : r.data;
+
+  if (only.length) {
+    const allow = new Set(only);
+    sports = sports.filter(s => allow.has(s.key));
+  }
+
   return json({
     ok: true,
-    sportKey: "mma_mixed_martial_arts",
-    note: "Use /events to list upcoming MMA events",
+    defaultSport: DEFAULT_SPORT,
+    sports,
+    meta: r.meta,
+    note: "Use sport keys in /events?sport=... and /snapshot?sport=...",
   });
 }
 
 async function handleEvents(url, env) {
-  const sport = url.searchParams.get("sport") || "mma_mixed_martial_arts";
+  const sport = url.searchParams.get("sport") || DEFAULT_SPORT;
 
   // Odds API: GET /sports/{sport}/events
   const r = await oddsFetch(env, `/sports/${sport}/events`, {});
@@ -86,37 +108,34 @@ async function handleEvents(url, env) {
 }
 
 async function handleSnapshot(url, env) {
-  const sport = url.searchParams.get("sport") || "mma_mixed_martial_arts";
+  const sport = url.searchParams.get("sport") || DEFAULT_SPORT;
 
-  // Markets you asked for
-  // - h2h (moneyline)
-  // - totals
-  // - h2h_lay / spreads etc optional
-  // - props may vary by plan + sport coverage
+  // Featured markets are typically: h2h, spreads, totals
   const markets = url.searchParams.get("markets") || "h2h,totals";
   const regions = url.searchParams.get("regions") || "us";
   const oddsFormat = url.searchParams.get("oddsFormat") || "american";
-
-  // Multiple books (Odds API uses "bookmakers" to filter)
-  // Provide comma-separated bookmakers keys (e.g. "draftkings,fanduel")
   const bookmakers = url.searchParams.get("bookmakers") || "";
-
-  // Event filter (recommended): eventId reduces payload
   const eventId = url.searchParams.get("eventId") || "";
 
-  // Endpoint: GET /sports/{sport}/odds
-  const params = {
-    regions,
-    markets,
-    oddsFormat,
-  };
+  const params = { regions, markets, oddsFormat };
   if (bookmakers) params.bookmakers = bookmakers;
-  if (eventId) params.eventIds = eventId; // Odds API supports eventIds in some endpoints; if not, we’ll adapt.
 
-  const r = await oddsFetch(env, `/sports/${sport}/odds`, params);
+  // If eventId is supplied, use the per-event odds endpoint
+  // (recommended for additional markets / props; also works cleanly for featured markets)
+  const endpoint = eventId
+    ? `/sports/${sport}/events/${eventId}/odds`
+    : `/sports/${sport}/odds`;
+
+  // If no eventId, you can optionally filter multiple events by eventIds (comma-separated)
+  // We'll keep your existing behavior for backwards compatibility:
+  if (!eventId) {
+    const eventIds = url.searchParams.get("eventIds") || "";
+    if (eventIds) params.eventIds = eventIds;
+  }
+
+  const r = await oddsFetch(env, endpoint, params);
   if (r.error) return json(r, 502);
 
-  // Normalize into a "market snapshot" with implied probabilities
   const normalized = normalizeSnapshot(r.data);
 
   return json({
@@ -131,14 +150,11 @@ async function handleSnapshot(url, env) {
 function americanToImpliedProb(american) {
   const a = Number(american);
   if (!Number.isFinite(a) || a === 0) return null;
-
   if (a > 0) return 100 / (a + 100);
-  // a < 0
   return (-a) / ((-a) + 100);
 }
 
 function normalizeSnapshot(raw) {
-  // raw is array of events with bookmakers -> markets -> outcomes
   if (!Array.isArray(raw)) return raw;
 
   return raw.map((ev) => {
@@ -161,7 +177,7 @@ function normalizeSnapshot(raw) {
             name: o.name,
             price,
             impliedProb: americanToImpliedProb(price),
-            point: o.point ?? null, // totals/spreads lines
+            point: o.point ?? null,
           });
         }
         bmOut.markets.push(mOut);
@@ -173,4 +189,5 @@ function normalizeSnapshot(raw) {
     return out;
   });
 }
+
 
