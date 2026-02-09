@@ -9,7 +9,7 @@ export default {
     }
 
     try {
-      if (path === "/sports") return await handleSports(url, env);
+      if (path === "/sports") return await handleSports(env);
       if (path === "/events") return await handleEvents(url, env);
       if (path === "/snapshot") return await handleSnapshot(url, env);
 
@@ -41,17 +41,25 @@ async function oddsFetch(env, endpoint, params = {}) {
   const base = "https://api.the-odds-api.com/v4";
   const u = new URL(base + endpoint);
 
+  // attach params
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, String(v));
   }
+
+  // attach apiKey (required)
   u.searchParams.set("apiKey", env.ODDS_API_KEY);
 
   const res = await fetch(u.toString());
   const text = await res.text();
 
   let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
 
+  // Helpful metadata: remaining requests etc if provided
   const meta = {
     status: res.status,
     remaining: res.headers.get("x-requests-remaining"),
@@ -62,33 +70,23 @@ async function oddsFetch(env, endpoint, params = {}) {
   return { error: false, meta, data };
 }
 
+// Defaults
 const DEFAULT_SPORT = "mma_mixed_martial_arts";
 
-/**
- * GET /sports
- * Returns the real list of sports from The Odds API.
- * Optional: ?only=mma,nfl,nba,mlb  (filters the returned list)
- */
-async function handleSports(url, env) {
-  const only = (url.searchParams.get("only") || "").split(",").map(s => s.trim()).filter(Boolean);
-
+async function handleSports(env) {
+  // Fetch full list of sports from The Odds API
   const r = await oddsFetch(env, `/sports`, {});
   if (r.error) return json(r, 502);
 
-  // Normalize to the keys/titles your GPT actually needs
-  let sports = Array.isArray(r.data)
-    ? r.data.map(s => ({
+  // Keep response light + GPT-friendly
+  const sports = Array.isArray(r.data)
+    ? r.data.map((s) => ({
         key: s.key,
         title: s.title,
         group: s.group,
         active: s.active,
       }))
     : r.data;
-
-  if (only.length) {
-    const allow = new Set(only);
-    sports = sports.filter(s => allow.has(s.key));
-  }
 
   return json({
     ok: true,
@@ -110,24 +108,33 @@ async function handleEvents(url, env) {
 async function handleSnapshot(url, env) {
   const sport = url.searchParams.get("sport") || DEFAULT_SPORT;
 
-  // Featured markets are typically: h2h, spreads, totals
+  // Markets (varies by sport/book/plan). Common: h2h, totals, spreads
   const markets = url.searchParams.get("markets") || "h2h,totals";
   const regions = url.searchParams.get("regions") || "us";
   const oddsFormat = url.searchParams.get("oddsFormat") || "american";
+
+  // Optional: filter specific bookmakers
   const bookmakers = url.searchParams.get("bookmakers") || "";
+
+  // Optional: single event targeting
   const eventId = url.searchParams.get("eventId") || "";
 
-  const params = { regions, markets, oddsFormat };
-  if (bookmakers) params.bookmakers = bookmakers;
-
-  // If eventId is supplied, use the per-event odds endpoint
-  // (recommended for additional markets / props; also works cleanly for featured markets)
+  // Base endpoint
+  // If eventId is provided, prefer per-event odds endpoint (best for props/expanded markets)
   const endpoint = eventId
     ? `/sports/${sport}/events/${eventId}/odds`
     : `/sports/${sport}/odds`;
 
-  // If no eventId, you can optionally filter multiple events by eventIds (comma-separated)
-  // We'll keep your existing behavior for backwards compatibility:
+  const params = {
+    regions,
+    markets,
+    oddsFormat,
+  };
+
+  if (bookmakers) params.bookmakers = bookmakers;
+
+  // If no single eventId, allow multi-event filter via eventIds query param
+  // (Backwards compatible + useful for batch calls)
   if (!eventId) {
     const eventIds = url.searchParams.get("eventIds") || "";
     if (eventIds) params.eventIds = eventIds;
@@ -136,6 +143,7 @@ async function handleSnapshot(url, env) {
   const r = await oddsFetch(env, endpoint, params);
   if (r.error) return json(r, 502);
 
+  // Normalize into a "market snapshot" with implied probabilities
   const normalized = normalizeSnapshot(r.data);
 
   return json({
@@ -150,11 +158,14 @@ async function handleSnapshot(url, env) {
 function americanToImpliedProb(american) {
   const a = Number(american);
   if (!Number.isFinite(a) || a === 0) return null;
+
   if (a > 0) return 100 / (a + 100);
+  // a < 0
   return (-a) / ((-a) + 100);
 }
 
 function normalizeSnapshot(raw) {
+  // raw is array of events with bookmakers -> markets -> outcomes
   if (!Array.isArray(raw)) return raw;
 
   return raw.map((ev) => {
@@ -167,7 +178,12 @@ function normalizeSnapshot(raw) {
     };
 
     for (const bm of ev.bookmakers || []) {
-      const bmOut = { key: bm.key, title: bm.title, last_update: bm.last_update, markets: [] };
+      const bmOut = {
+        key: bm.key,
+        title: bm.title,
+        last_update: bm.last_update,
+        markets: [],
+      };
 
       for (const m of bm.markets || []) {
         const mOut = { key: m.key, outcomes: [] };
@@ -177,7 +193,7 @@ function normalizeSnapshot(raw) {
             name: o.name,
             price,
             impliedProb: americanToImpliedProb(price),
-            point: o.point ?? null,
+            point: o.point ?? null, // totals/spreads lines
           });
         }
         bmOut.markets.push(mOut);
@@ -189,5 +205,3 @@ function normalizeSnapshot(raw) {
     return out;
   });
 }
-
-
