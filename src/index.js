@@ -202,6 +202,6 @@ function normalizeSnapshot(raw) {
       out.bookmakers.push(bmOut);
     }
 
-    return out;
+        return out;
   });
 }
