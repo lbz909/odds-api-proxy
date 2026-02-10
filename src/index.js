@@ -5,9 +5,7 @@ export default {
 
     // CORS preflight
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: corsHeaders(),
-      });
+      return new Response(null, { headers: corsHeaders() });
     }
 
     try {
@@ -55,7 +53,11 @@ async function oddsFetch(env, endpoint, params = {}) {
   const text = await res.text();
 
   let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
 
   // Helpful metadata: remaining requests etc if provided
   const meta = {
@@ -68,17 +70,35 @@ async function oddsFetch(env, endpoint, params = {}) {
   return { error: false, meta, data };
 }
 
+// Defaults
+const DEFAULT_SPORT = "mma_mixed_martial_arts";
+
 async function handleSports(env) {
-  // MMA key commonly: mma_mixed_martial_arts
+  // Fetch full list of sports from The Odds API
+  const r = await oddsFetch(env, `/sports`, {});
+  if (r.error) return json(r, 502);
+
+  // Keep response light + GPT-friendly
+  const sports = Array.isArray(r.data)
+    ? r.data.map((s) => ({
+        key: s.key,
+        title: s.title,
+        group: s.group,
+        active: s.active,
+      }))
+    : r.data;
+
   return json({
     ok: true,
-    sportKey: "mma_mixed_martial_arts",
-    note: "Use /events to list upcoming MMA events",
+    defaultSport: DEFAULT_SPORT,
+    sports,
+    meta: r.meta,
+    note: "Use sport keys in /events?sport=... and /snapshot?sport=...",
   });
 }
 
 async function handleEvents(url, env) {
-  const sport = url.searchParams.get("sport") || "mma_mixed_martial_arts";
+  const sport = url.searchParams.get("sport") || DEFAULT_SPORT;
 
   // Odds API: GET /sports/{sport}/events
   const r = await oddsFetch(env, `/sports/${sport}/events`, {});
@@ -86,34 +106,41 @@ async function handleEvents(url, env) {
 }
 
 async function handleSnapshot(url, env) {
-  const sport = url.searchParams.get("sport") || "mma_mixed_martial_arts";
+  const sport = url.searchParams.get("sport") || DEFAULT_SPORT;
 
-  // Markets you asked for
-  // - h2h (moneyline)
-  // - totals
-  // - h2h_lay / spreads etc optional
-  // - props may vary by plan + sport coverage
+  // Markets (varies by sport/book/plan). Common: h2h, totals, spreads
   const markets = url.searchParams.get("markets") || "h2h,totals";
   const regions = url.searchParams.get("regions") || "us";
   const oddsFormat = url.searchParams.get("oddsFormat") || "american";
 
-  // Multiple books (Odds API uses "bookmakers" to filter)
-  // Provide comma-separated bookmakers keys (e.g. "draftkings,fanduel")
+  // Optional: filter specific bookmakers
   const bookmakers = url.searchParams.get("bookmakers") || "";
 
-  // Event filter (recommended): eventId reduces payload
+  // Optional: single event targeting
   const eventId = url.searchParams.get("eventId") || "";
 
-  // Endpoint: GET /sports/{sport}/odds
+  // Base endpoint
+  // If eventId is provided, prefer per-event odds endpoint (best for props/expanded markets)
+  const endpoint = eventId
+    ? `/sports/${sport}/events/${eventId}/odds`
+    : `/sports/${sport}/odds`;
+
   const params = {
     regions,
     markets,
     oddsFormat,
   };
-  if (bookmakers) params.bookmakers = bookmakers;
-  if (eventId) params.eventIds = eventId; // Odds API supports eventIds in some endpoints; if not, we’ll adapt.
 
-  const r = await oddsFetch(env, `/sports/${sport}/odds`, params);
+  if (bookmakers) params.bookmakers = bookmakers;
+
+  // If no single eventId, allow multi-event filter via eventIds query param
+  // (Backwards compatible + useful for batch calls)
+  if (!eventId) {
+    const eventIds = url.searchParams.get("eventIds") || "";
+    if (eventIds) params.eventIds = eventIds;
+  }
+
+  const r = await oddsFetch(env, endpoint, params);
   if (r.error) return json(r, 502);
 
   // Normalize into a "market snapshot" with implied probabilities
@@ -151,7 +178,12 @@ function normalizeSnapshot(raw) {
     };
 
     for (const bm of ev.bookmakers || []) {
-      const bmOut = { key: bm.key, title: bm.title, last_update: bm.last_update, markets: [] };
+      const bmOut = {
+        key: bm.key,
+        title: bm.title,
+        last_update: bm.last_update,
+        markets: [],
+      };
 
       for (const m of bm.markets || []) {
         const mOut = { key: m.key, outcomes: [] };
@@ -170,7 +202,6 @@ function normalizeSnapshot(raw) {
       out.bookmakers.push(bmOut);
     }
 
-    return out;
+        return out;
   });
 }
-
